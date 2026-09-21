@@ -1,0 +1,40 @@
+{
+  "name": "@finance/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Fastify + TypeScript HTTP API for the personal finance tracker.",
+  "main": "./dist/index.js",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "concurrently --names tsc,node --prefix-colors gray,cyan \"tsc -p tsconfig.json --watch --preserveWatchOutput\" \"node --watch --env-file-if-exists=../../.env dist/index.js\"",
+    "build": "tsc -p tsconfig.json && node --input-type=module -e \"import{cpSync}from'node:fs';cpSync('src/db/migrations','dist/db/migrations',{recursive:true})\"",
+    "start": "node --env-file-if-exists=../../.env dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p test/tsconfig.json --noEmit",
+    "pretest": "npm run build --workspace @finance/contracts && npm run build",
+    "test": "vitest run",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "npm run build && node --env-file-if-exists=../../.env dist/db/migrate.js",
+    "db:seed": "npm run build && node --env-file-if-exists=../../.env dist/db/seed.js",
+    "db:reset": "npm run build && node --env-file-if-exists=../../.env dist/db/reset.js && npm run db:seed"
+  },
+  "dependencies": {
+    "@fastify/swagger": "9.8.1",
+    "@fastify/swagger-ui": "6.1.1",
+    "@finance/contracts": "*",
+    "@node-rs/argon2": "2.2.1",
+    "better-sqlite3": "13.0.3",
+    "drizzle-orm": "0.45.2",
+    "fastify": "5.12.5",
+    "fastify-type-provider-zod": "7.0.0",
+    "jose": "6.2.12",
+    "uuid": "14.0.2",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
+    "drizzle-kit": "0.31.10"
+  }
+}

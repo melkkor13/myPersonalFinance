@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+coverage/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Local SQLite database (data/ is created at runtime by DB_PATH)
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# NOTE: drizzle-kit writes apps/api/src/db/migrations/meta/_journal.json and
+# meta/*_snapshot.json. The migrator REQUIRES them, so they must stay tracked.
+# Never add a `meta/` or `*.json` ignore here.

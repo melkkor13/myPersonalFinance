@@ -1,0 +1,71 @@
+# CI gate for the personal finance tracker monorepo (requirements.md FR15).
+#
+# Runs on every push and every pull request: `npm ci` -> typecheck -> lint ->
+# test -> build, in that order. Steps run sequentially and there is no
+# `continue-on-error` anywhere, so the first failing step fails the whole build
+# and later steps never run.
+#
+# Registry: the committed root `.npmrc` pins `registry=https://registry.npmjs.org`
+# (Q4, superseded 2026-09-21). The lockfile is uniformly npmjs.org, so `npm ci`
+# needs NO AWS CodeArtifact credentials and no auth step here.
+#
+# Node: single version, no matrix (Q3). Root `engines` is `>=22.13.0`.
+#
+# Build ordering: `apps/api` and `apps/web` each have `pretest`/`prebuild` hooks
+# that build `@finance/contracts` first, so `npm run test` works from a cold
+# clone with an empty `node_modules` and the FR15 order is safe as written.
+#
+# DEFERRED MANUAL VERIFICATION — test case 33 / D1 (the CI gate):
+#   This workflow has never been executed. Per Q2 the repository is local-only:
+#   `git init`, no GitHub remote, nothing pushed. Complete the verification once
+#   a remote exists:
+#     1. `git remote add origin <url>` and push `main`.
+#     2. Create a branch that introduces a deliberate TypeScript type error
+#        (e.g. assign a string to a number-typed field in `apps/api/src`).
+#     3. Push that branch / open a PR and confirm the run FAILS at the
+#        `npm run typecheck` step, that `lint`, `test` and `build` are skipped,
+#        and that the check is reported as failing on the PR.
+#     4. Remove the deliberate error and confirm the run goes green.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    name: typecheck / lint / test / build
+    runs-on: ubuntu-latest
+
+    env:
+      # CI fixture only — NOT a secret. The API refuses to boot unless
+      # JWT_SECRET is present and >= 32 characters (FR12), and some API tests
+      # spawn a real `node dist/index.js` child process. Any real deployment
+      # must supply its own key via secret management (A4).
+      JWT_SECRET: ci-dummy-jwt-secret-not-a-real-key-000000
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test
+
+      - name: Build
+        run: npm run build

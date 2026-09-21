@@ -1,0 +1,4 @@
+node_modules
+dist
+coverage
+**/src/db/migrations/**
