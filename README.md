@@ -223,9 +223,16 @@ not externally reachable, and `/api/v1/openapi.json` is no longer anonymous.
    there is no second app-side allowlist.
 3. Copy two values into `.env` on the Pi:
    - `CF_ACCESS_TEAM_DOMAIN` — your team domain, a bare hostname
-     (`your-team.cloudflareaccess.com`), no scheme and no trailing slash.
-   - `CF_ACCESS_AUD` — the application's **Application Audience (AUD) Tag**, 64 hex characters,
-     from the application's Overview tab.
+     (`your-team.cloudflareaccess.com`), no scheme and no trailing slash. Account-wide.
+   - `CF_ACCESS_AUD` — **this application's** Application Audience (AUD) Tag, 64 hex characters,
+     from its Overview tab. **It is per application**, so a tag from another app on the same zone
+     will verify signature and issuer and then fail the audience pin — a login loop with a
+     correct-looking config. To read it straight off the wire:
+
+     ```sh
+     curl -s -o /dev/null -w '%{redirect_url}\n' https://fin.kryp7x.com/ \
+       | sed -n 's#.*[?&]kid=\([0-9a-f]\{64\}\).*#\1#p'
+     ```
 4. Set `CF_ACCESS_ENABLED=true` and restart. Enabling it without the other two is a fatal boot
    error, deliberately: a box that believes Access is on but silently fell back to password-only
    looks identical from outside to a working one.

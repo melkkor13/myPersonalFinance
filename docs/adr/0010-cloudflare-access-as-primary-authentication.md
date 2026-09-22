@@ -12,22 +12,32 @@ to protect.
 
 ## Context
 
-The application runs on a Raspberry Pi 5 behind a Cloudflare Tunnel at `kryp7x.com`, and that
-hostname **was already protected by Cloudflare Access** before this change. Verified against the
-live deployment:
+The application runs on a Raspberry Pi 5, reached from the internet through a Cloudflare Tunnel, and
+the intended hostname is `fin.kryp7x.com`. Cloudflare Access is the authentication layer in front of
+it.
 
-- `GET https://kryp7x.com/` answers `302` to
-  `https://sparkling-math-c6db.cloudflareaccess.com/cdn-cgi/access/login/kryp7x.com?kid=<aud>`,
-  sets a `CF_AppSession` cookie, and sends `WWW-Authenticate: Cloudflare-Access`.
-- `/api/v1/health` and `/api/v1/openapi.json` redirect identically, so the protection covers the
-  whole hostname rather than just the document root.
-- The team's JWKS is at `https://sparkling-math-c6db.cloudflareaccess.com/cdn-cgi/access/certs`,
-  RS256, with two keys published for rotation.
+Observed behaviour of Access in this Cloudflare account, against an application on the same zone
+(the apex, `kryp7x.com`) that was already protected when this was written:
 
-So a user authenticated **twice**: once at the edge, then again against `POST /api/v1/auth/login`.
-The API ignored an identity Cloudflare had already proved, and the scaffold's browser-side token
-handling — a 30-day refresh token in `localStorage` — remained the deployment's largest outstanding
-security gap.
+- `GET /` answers `302` to
+  `https://<team>.cloudflareaccess.com/cdn-cgi/access/login/<hostname>?kid=<aud>`, sets a
+  `CF_AppSession` cookie, and sends `WWW-Authenticate: Cloudflare-Access`.
+- Every path redirects identically, including `/api/v1/health` and `/api/v1/openapi.json`, so an
+  Access application covers the whole hostname rather than just the document root.
+- The team's JWKS is at `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`, RS256, with two
+  keys published for rotation.
+- `/.well-known/openid-configuration` exposes only `issuer` and `jwks_uri`.
+
+**`aud` is per application, not per account or per zone.** The apex's AUD tag is not
+`fin.kryp7x.com`'s; a token minted for one is refused by the other, which is the pin working
+correctly rather than a misconfiguration. Read the tag from the application's own Overview tab, or
+from the `kid` parameter of its login redirect. It is deliberately not recorded here — hardcoding
+one application's tag in the documentation is how the wrong value gets copied into `.env`.
+
+Without this change a user authenticated **twice**: once at the edge, then again against
+`POST /api/v1/auth/login`. The API ignored an identity Cloudflare had already proved, and the
+scaffold's browser-side token handling — a 30-day refresh token in `localStorage` — remained the
+deployment's largest outstanding security gap.
 
 Two constraints shaped the decision:
 
@@ -35,7 +45,7 @@ Two constraints shaped the decision:
    no injected header exist, and it is the path any future CLI or mobile client will use.
 2. **Cloudflare Access cannot act as an OIDC provider.** Its
    `/.well-known/openid-configuration` exposes only `issuer` and `jwks_uri` — no
-   `authorization_endpoint`, no `token_endpoint`. Access *consumes* identity providers; it does not
+   `authorization_endpoint`, no `token_endpoint`. Access _consumes_ identity providers; it does not
    present itself as one. An authorization-code flow against it was therefore never available, and
    the choice was only ever about what to do with the header it injects.
 
@@ -83,7 +93,7 @@ Verify the assertion once, then mint the existing access/refresh pair.
 ### Option C: Move session issuance to a Cloudflare Worker with KV/D1
 
 **Pros:** would centralise sessions at the edge.
-**Cons:** the product *is* a single SQLite file on the Pi. Wholly disproportionate, and it would
+**Cons:** the product _is_ a single SQLite file on the Pi. Wholly disproportionate, and it would
 split state across two systems.
 
 ## Decision
@@ -96,13 +106,13 @@ Adopt **Option A**, alongside the existing password login rather than in place o
   the key cache, the rotation handling for an unknown `kid`, and the coalescing of concurrent
   fetches.
 
-  The `aud` pin is load-bearing, not decorative: it is the only claim scoping a token to *this*
+  The `aud` pin is load-bearing, not decorative: it is the only claim scoping a token to _this_
   application. A token minted for a different app in the same Zero Trust account is otherwise
   correctly signed, in date, and from the right issuer.
 
 - **This is not "trusting a header".** The value is a signed JWT verified against Cloudflare's
   published keys. Someone who reaches nginx without traversing the tunnel gains nothing by inventing
-  the header. The *unsigned* `Cf-Access-Authenticated-User-Email` header Cloudflare also sends is
+  the header. The _unsigned_ `Cf-Access-Authenticated-User-Email` header Cloudflare also sends is
   named in the source as something never to read, because it is the obvious shortcut and it is
   trivially spoofable on that path.
 
@@ -111,7 +121,7 @@ Adopt **Option A**, alongside the existing password login rather than in place o
   1. **A present assertion must verify.** Its presence means the edge asserted an identity, so one
      that will not verify is an anomaly — clock skew, a key-rotation gap, or tampering. This **fails
      closed** rather than falling through, because silently downgrading to a different
-     authentication model on an anomaly is how bypasses get built. An *absent* header is not an
+     authentication model on an anomaly is how bypasses get built. An _absent_ header is not an
      anomaly: it is the ordinary local-dev case, and falls through.
   2. **An explicit `Authorization: Bearer` then decides the principal**, even when a valid assertion
      is also present, so a CLI or mobile client's own token is never silently ignored.
@@ -131,7 +141,7 @@ Adopt **Option A**, alongside the existing password login rather than in place o
 - **`users.password_hash` holds an Argon2id hash of 32 discarded CSPRNG bytes** for a provisioned
   account. A marker string such as `'!cloudflare-access'` was rejected: `verifyPassword` answers
   `false` for a malformed hash in microseconds versus tens of milliseconds for a real verify, which
-  would have made "this address is an Access account" measurable from response time — a *better*
+  would have made "this address is an Access account" measurable from response time — a _better_
   account oracle than the one `TIMING_DECOY_PASSWORD_HASH` was added to destroy. Making the column
   nullable was rejected too: `string | null` propagates into `login`, and someone eventually writes
   `if (hash === null) throw` and reintroduces the same branch. Hashing real entropy means `login`
@@ -155,7 +165,7 @@ Adopt **Option A**, alongside the existing password login rather than in place o
   API is unchanged for non-browser clients.
 
 - **Negative — CSRF is now possible in principle, and is defended explicitly.** Access
-  authentication is *ambient*: the `CF_Authorization` cookie is sent automatically, so a
+  authentication is _ambient_: the `CF_Authorization` cookie is sent automatically, so a
   third-party page doing `fetch(url, { credentials: 'include' })` arrives fully authenticated. The
   access-token path was structurally immune to this because an attacker's page cannot set an
   `Authorization` header. The guard therefore requires the `X-Request-Id` header — which the SPA
@@ -176,7 +186,7 @@ Adopt **Option A**, alongside the existing password login rather than in place o
   user sessions" action invalidates the `identity_nonce` claim, and the only way to observe that is
   to call `/cdn-cgi/access/get-identity` with the token on every request. We deliberately do not, so
   `identity_nonce` is ignored. Mitigate by keeping the application's Zero Trust session duration
-  short (24h rather than the longer options). A *user-initiated* logout is immediate, because the
+  short (24h rather than the longer options). A _user-initiated_ logout is immediate, because the
   edge clears the cookie.
 
 - **Neutral — identity is joined on email.** If the upstream identity provider ever changes
