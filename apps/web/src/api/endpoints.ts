@@ -1,4 +1,5 @@
 import {
+  CF_ACCESS_LOGOUT_PATH,
   ROUTES,
   type HealthResponse,
   type LoginRequest,
@@ -10,7 +11,13 @@ import {
 import { apiRequest } from './client';
 import { HEALTH_ACCEPTED_STATUSES, HTTP_METHOD } from './constants';
 import { rawRequest } from './http';
-import { clearTokens, getRefreshToken, setTokens } from './tokens';
+import {
+  clearTokens,
+  getRefreshToken,
+  isCloudflareAccessMode,
+  setAuthMode,
+  setTokens,
+} from './tokens';
 
 /**
  * One function per API route the scaffold exposes. Paths come from `ROUTES` in
@@ -39,6 +46,17 @@ export async function login(credentials: LoginRequest): Promise<void> {
  * user in a half-signed-in state.
  */
 export async function logout(): Promise<void> {
+  // Under Cloudflare Access the session IS the edge's `CF_Authorization`
+  // cookie, which this origin cannot clear. Ending it means a full-page
+  // navigation to Cloudflare's own logout endpoint, which is terminated at the
+  // edge and never reaches our nginx. A `fetch` here would appear to succeed
+  // while leaving the user signed in.
+  if (isCloudflareAccessMode()) {
+    clearTokens();
+    window.location.assign(CF_ACCESS_LOGOUT_PATH);
+    return;
+  }
+
   const refreshToken = getRefreshToken();
 
   try {
@@ -56,9 +74,21 @@ export async function logout(): Promise<void> {
   }
 }
 
-/** `GET /api/v1/me` — the one access-token-protected route, so it may refresh. */
-export function fetchMe(): Promise<MeResponse> {
-  return apiRequest<MeResponse>(ROUTES.ME, { method: HTTP_METHOD.GET, withAuth: true });
+/**
+ * `GET /api/v1/me` — the one protected route, so it may refresh.
+ *
+ * This is also where the app learns which credential the server accepted. It is
+ * the only response carrying `auth_mode`, and recording it here means every
+ * caller — the route guards, `useIsAuthenticated`, `logout` — sees a consistent
+ * answer without a second request.
+ */
+export async function fetchMe(): Promise<MeResponse> {
+  const me = await apiRequest<MeResponse>(ROUTES.ME, {
+    method: HTTP_METHOD.GET,
+    withAuth: true,
+  });
+  setAuthMode(me.auth_mode);
+  return me;
 }
 
 /** `GET /api/v1/health` — unauthenticated; 503 carries a body, not an error. */

@@ -303,3 +303,71 @@ so a migration does not require a valid signing key.
   mentioned `PRAGMA` or `better-sqlite3` to keep a regex-based scan green. The boundary tests were
   rewritten to parse the AST and match real import statements for this reason. Don't reintroduce a
   text grep.
+
+---
+
+## A Cloudflare Access assertion must never be turned into a longer-lived token
+
+Behind Cloudflare Access the browser holds **no credential** (ADR 0010): the session is Cloudflare's
+`HttpOnly` `CF_Authorization` cookie, and the API verifies the header the edge injects on every
+request. The tempting refactor — verify once at `POST /auth/cloudflare`, mint our normal token pair,
+carry on as before — puts a 30-day refresh token straight back into `localStorage`, which is the
+exact gap Access was adopted to close. It also survives revoking the user at the edge.
+
+If a non-browser client needs a long-lived credential, give it a password account. That is what the
+password path is still there for.
+
+---
+
+## `users.password_hash` for an Access account is a real hash, not a marker
+
+It holds an Argon2id hash of 32 discarded CSPRNG bytes. This looks like pointless work and is not.
+
+`verifyPassword` catches a malformed stored hash and returns `false` in **microseconds**, whereas a
+genuine Argon2id verify costs tens of milliseconds. So a marker string like `'!cloudflare-access'`
+would make "this address is an Access account" measurable from response time alone — a better
+account oracle than the one `TIMING_DECOY_PASSWORD_HASH` in `auth.service.ts` exists to destroy.
+
+Because the hash is real, `login()` needs **no branch at all** for these accounts: it runs a
+full-cost verify that simply never matches, and inherits the existing wrong-password path's
+byte-identical body and equal wall-clock cost. Do not "simplify" this to a sentinel, and do not make
+the column nullable — `string | null` propagates into `login` and invites the same branch back.
+
+---
+
+## The Raspberry Pi has no battery-backed clock, and Access tokens are time-sensitive
+
+The Pi 5 ships without an RTC battery. After a power cut the clock can be far enough off that every
+Cloudflare Access assertion is rejected as expired or not-yet-valid, and unlike an HS256 token you
+cannot re-mint your way out of it — the `exp` is Cloudflare's. The app 401s everything until NTP
+converges, while `/api/v1/health` stays green throughout, so the healthcheck will not tell you.
+
+Install `fake-hwclock` (`sudo apt install fake-hwclock`) so boot starts from the last known time
+rather than the epoch.
+
+---
+
+## `/cdn-cgi/access/*` is edge-only, so nginx must 404 it
+
+Those paths are terminated at the Cloudflare edge and never reach the container. Without the
+explicit `location /cdn-cgi/ { return 404; }` in `deploy/nginx.conf`, they fall into the SPA
+fallback and answer `200` with `index.html` — so a logout performed against a bypassed origin looks
+successful while leaving the session intact.
+
+For the same reason, signing out of an Access session is `window.location.assign()`, not `fetch()`.
+
+---
+
+## `createRemoteJWKSet` must be built once, not per request
+
+The object `jose`'s `createRemoteJWKSet` returns is not a URL wrapper: it owns the key cache, the
+rotation handling for an unknown `kid`, and the coalescing of concurrent fetches. Constructing it
+inside the request path would refetch the team JWKS on every request and defeat all three. It is
+built once in `buildServer()` and reached through `request.server.cfAccessVerifier`.
+
+Construction is lazy and does no network I/O, so this does not make `buildServer` impure.
+
+The API test suite is offline, so `createCfAccessVerifier` takes an injectable `jwks` argument and
+`startCfAccessServer` passes a `createLocalJWKSet` over a generated key pair. One case in
+`cf-access-auth.test.ts` makes `fetch` throw and asserts authentication still works, so the
+hermeticity is proven rather than assumed.

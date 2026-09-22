@@ -75,6 +75,56 @@ export const LOG_LEVEL_VALUES = [
 ] as const;
 export const DEFAULT_LOG_LEVEL = LOG_LEVEL_INFO;
 
+/* --- Cloudflare Access ------------------------------------------------------ *
+ * The app is fronted by Cloudflare Access in production (ADR 0010). These three
+ * are OPTIONAL: Access is off unless `CF_ACCESS_ENABLED` is true, so local
+ * `npm run dev` — where no edge and no `Cf-Access-Jwt-Assertion` header exist —
+ * is unaffected by their absence.
+ */
+
+/** The two strings `CF_ACCESS_ENABLED` accepts, so `"yes"` fails loudly. */
+export const BOOLEAN_TRUE = 'true';
+export const BOOLEAN_FALSE = 'false';
+export const BOOLEAN_VALUES = [BOOLEAN_TRUE, BOOLEAN_FALSE] as const;
+
+/**
+ * `CF_ACCESS_ENABLED` — accept verified Access JWTs. **Off by default**, so
+ * local `npm run dev` and every existing test are unaffected by this feature.
+ */
+export const DEFAULT_CF_ACCESS_ENABLED = BOOLEAN_FALSE;
+
+/**
+ * `CF_ACCESS_AUD` — the Access *application* audience tag, 64 lowercase hex.
+ *
+ * Validated by shape because it is the one claim that scopes a token to THIS
+ * application: a token minted for a different app in the same Zero Trust account
+ * is otherwise perfectly valid. A pasted team domain or a truncated tag would
+ * fail only at verify time, as an unexplained 401 loop with a correct-looking
+ * config.
+ */
+export const CF_ACCESS_AUD_PATTERN = /^[0-9a-f]{64}$/;
+export const CF_ACCESS_AUD_FORMAT_MESSAGE =
+  'must be the 64-character lowercase hex Access application audience (AUD) tag';
+
+/**
+ * `CF_ACCESS_TEAM_DOMAIN` — a **bare hostname**, e.g.
+ * `your-team.cloudflareaccess.com`. The issuer and JWKS URLs are derived from it
+ * (`lib/cloudflare-access.ts`), so a scheme or trailing slash here would produce
+ * a malformed issuer that never matches the token's `iss`.
+ */
+/** Longest DNS name, so a pasted blob is rejected before the regex is tried. */
+export const CF_ACCESS_TEAM_DOMAIN_MAX_LENGTH = 253;
+
+export const CF_ACCESS_TEAM_DOMAIN_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9-]+)+$/i;
+export const CF_ACCESS_TEAM_DOMAIN_FORMAT_MESSAGE =
+  'must be a bare hostname with no scheme, port, path or trailing slash (e.g. your-team.cloudflareaccess.com)';
+
+/** Reported when Access is switched on but a value it cannot work without is absent. */
+export const CF_ACCESS_REQUIRED_MESSAGE = `is required when CF_ACCESS_ENABLED is ${BOOLEAN_TRUE}`;
+
+/** The variables `CF_ACCESS_ENABLED=true` makes mandatory. */
+export const CF_ACCESS_REQUIRED_VARIABLES = ['CF_ACCESS_TEAM_DOMAIN', 'CF_ACCESS_AUD'] as const;
+
 /** Prefix on every fatal config error. Asserted by the boot-failure test. */
 export const INVALID_CONFIG_MESSAGE_PREFIX = 'Invalid environment configuration';
 /** Separator between the variable name and its failure reason. */
@@ -105,6 +155,46 @@ const envSchema = z.object({
   ACCESS_TOKEN_TTL: z.string().min(1).default(DEFAULT_ACCESS_TOKEN_TTL),
   REFRESH_TOKEN_TTL: z.string().min(1).default(DEFAULT_REFRESH_TOKEN_TTL),
   LOG_LEVEL: z.enum(LOG_LEVEL_VALUES).default(DEFAULT_LOG_LEVEL),
+
+  // Optional at the field level; the cross-field rule below is what makes them
+  // mandatory once Access is switched on.
+  CF_ACCESS_ENABLED: z
+    .enum(BOOLEAN_VALUES)
+    .default(DEFAULT_CF_ACCESS_ENABLED)
+    .transform((value) => value === BOOLEAN_TRUE),
+  CF_ACCESS_TEAM_DOMAIN: z
+    .string()
+    .max(CF_ACCESS_TEAM_DOMAIN_MAX_LENGTH)
+    .regex(CF_ACCESS_TEAM_DOMAIN_PATTERN, CF_ACCESS_TEAM_DOMAIN_FORMAT_MESSAGE)
+    .optional(),
+  CF_ACCESS_AUD: z.string().regex(CF_ACCESS_AUD_PATTERN, CF_ACCESS_AUD_FORMAT_MESSAGE).optional(),
+});
+
+/**
+ * Cross-field rule: enabling Access without the values needed to verify a token
+ * is **fatal**, never a silent downgrade.
+ *
+ * This is the failure worth being loud about. A box that is internet-facing and
+ * believes Access is on, but in fact fell back to password-only, looks identical
+ * to a working one from the outside — right up until someone notices
+ * `POST /auth/login` is still reachable and still unthrottled.
+ *
+ * `superRefine` rather than per-field `.min()` so `issue.path` names the exact
+ * variable, which is what `ConfigValidationError` promises the operator.
+ */
+const validatedEnvSchema = envSchema.superRefine((env, ctx) => {
+  if (!env.CF_ACCESS_ENABLED) {
+    return;
+  }
+  for (const variable of CF_ACCESS_REQUIRED_VARIABLES) {
+    if (env[variable] === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [variable],
+        message: CF_ACCESS_REQUIRED_MESSAGE,
+      });
+    }
+  }
 });
 
 /** The validated, camelCase-keyed configuration object handed to `buildServer()`. */
@@ -116,6 +206,15 @@ export interface AppConfig {
   readonly accessTokenTtl: string;
   readonly refreshTokenTtl: string;
   readonly logLevel: (typeof LOG_LEVEL_VALUES)[number];
+  /**
+   * Whether a verified `Cf-Access-Jwt-Assertion` header authenticates a request.
+   * When `false` the header is ignored entirely — not merely unverified.
+   */
+  readonly cfAccessEnabled: boolean;
+  /** Bare hostname, e.g. `your-team.cloudflareaccess.com`. Absent unless enabled. */
+  readonly cfAccessTeamDomain?: string | undefined;
+  /** The Access application AUD tag, 64 lowercase hex. Absent unless enabled. */
+  readonly cfAccessAud?: string | undefined;
   /** Read from `apps/api/package.json` at boot, for `HealthResponse.version`. */
   readonly version: string;
 }
@@ -161,7 +260,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
     }
   }
 
-  const result = envSchema.safeParse(present);
+  const result = validatedEnvSchema.safeParse(present);
 
   if (!result.success) {
     const variables = result.error.issues.map(
@@ -190,6 +289,9 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
     accessTokenTtl: env.ACCESS_TOKEN_TTL,
     refreshTokenTtl: env.REFRESH_TOKEN_TTL,
     logLevel: env.LOG_LEVEL,
+    cfAccessEnabled: env.CF_ACCESS_ENABLED,
+    cfAccessTeamDomain: env.CF_ACCESS_TEAM_DOMAIN,
+    cfAccessAud: env.CF_ACCESS_AUD,
     version: readAppVersion(),
   };
 }

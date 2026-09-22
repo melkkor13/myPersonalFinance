@@ -176,3 +176,99 @@ describe('a valid configuration is accepted (control for case 29)', () => {
     expect(config.jwtSecret).toBe(TEST_JWT_SECRET);
   });
 });
+
+/**
+ * Cloudflare Access configuration (ADR 0010).
+ *
+ * These are `loadConfig`-level rather than spawn-level cases: the failure mode
+ * being defended against is not a crash, it is a **silent downgrade**. A box
+ * that believes Access is on but in fact fell back to password-only looks
+ * identical from the outside to a working one — right up until someone notices
+ * `POST /auth/login` is still reachable on the public internet.
+ */
+describe('Cloudflare Access configuration', () => {
+  const VALID_TEAM_DOMAIN = 'test-team.cloudflareaccess.com';
+  const VALID_AUD = 'a'.repeat(64);
+
+  /** A config that is otherwise valid, so only the Access vars are under test. */
+  function envWith(overrides: Record<string, string>): Record<string, string> {
+    return { [ENV_JWT_SECRET]: TEST_JWT_SECRET, ...overrides };
+  }
+
+  function expectRejected(env: Record<string, string>, variable: string): void {
+    let thrown: unknown;
+    try {
+      loadConfig(env);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(ConfigValidationError);
+    expect((thrown as ConfigValidationError).variables).toContain(variable);
+  }
+
+  it('is disabled by default, so nothing else is required', () => {
+    const config = loadConfig(envWith({}));
+
+    expect(config.cfAccessEnabled).toBe(false);
+    expect(config.cfAccessTeamDomain).toBeUndefined();
+    expect(config.cfAccessAud).toBeUndefined();
+  });
+
+  it('accepts a complete configuration', () => {
+    const config = loadConfig(
+      envWith({
+        CF_ACCESS_ENABLED: 'true',
+        CF_ACCESS_TEAM_DOMAIN: VALID_TEAM_DOMAIN,
+        CF_ACCESS_AUD: VALID_AUD,
+      }),
+    );
+
+    expect(config.cfAccessEnabled).toBe(true);
+    expect(config.cfAccessTeamDomain).toBe(VALID_TEAM_DOMAIN);
+    expect(config.cfAccessAud).toBe(VALID_AUD);
+  });
+
+  it('refuses to boot when enabled without a team domain', () => {
+    expectRejected(
+      envWith({ CF_ACCESS_ENABLED: 'true', CF_ACCESS_AUD: VALID_AUD }),
+      'CF_ACCESS_TEAM_DOMAIN',
+    );
+  });
+
+  it('refuses to boot when enabled without an audience', () => {
+    expectRejected(
+      envWith({ CF_ACCESS_ENABLED: 'true', CF_ACCESS_TEAM_DOMAIN: VALID_TEAM_DOMAIN }),
+      'CF_ACCESS_AUD',
+    );
+  });
+
+  it('rejects an audience that is not the 64-hex AUD tag', () => {
+    // A truncated or mistyped tag would otherwise fail only at the first real
+    // request, as an unexplained 401 loop with a correct-looking config.
+    expectRejected(
+      envWith({
+        CF_ACCESS_ENABLED: 'true',
+        CF_ACCESS_TEAM_DOMAIN: VALID_TEAM_DOMAIN,
+        CF_ACCESS_AUD: 'not-a-hex-aud-tag',
+      }),
+      'CF_ACCESS_AUD',
+    );
+  });
+
+  it('rejects a team domain carrying a scheme', () => {
+    // The issuer string is derived by prefixing `https://`, so a scheme here
+    // would produce an issuer that can never match a token's `iss`.
+    expectRejected(
+      envWith({
+        CF_ACCESS_ENABLED: 'true',
+        CF_ACCESS_TEAM_DOMAIN: `https://${VALID_TEAM_DOMAIN}`,
+        CF_ACCESS_AUD: VALID_AUD,
+      }),
+      'CF_ACCESS_TEAM_DOMAIN',
+    );
+  });
+
+  it('rejects a non-boolean CF_ACCESS_ENABLED rather than treating it as false', () => {
+    expectRejected(envWith({ CF_ACCESS_ENABLED: 'yes' }), 'CF_ACCESS_ENABLED');
+  });
+});

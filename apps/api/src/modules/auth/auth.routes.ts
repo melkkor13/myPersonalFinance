@@ -214,7 +214,7 @@ export const authModule: FastifyPluginCallback = (app, _options, done) => {
       if (authenticatedUser === undefined) {
         throw new UnauthenticatedError();
       }
-      return me(app.config, authenticatedUser.id);
+      return me(app.config, authenticatedUser.id, authenticatedUser.mode);
     },
   );
 

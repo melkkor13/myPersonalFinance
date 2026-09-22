@@ -10,6 +10,7 @@
  * password becomes a hash.
  */
 import { hash, verify } from '@node-rs/argon2';
+import { randomBytes } from 'node:crypto';
 
 /* ------------------------------------------------------------------ *
  * Named constants
@@ -34,6 +35,45 @@ export const ARGON2ID_HASH_PREFIX = '$argon2id$';
 
 /** Options handed to every `hash()` call, so no two call sites can drift. */
 const ARGON2ID_HASH_OPTIONS = { algorithm: ARGON2ID_ALGORITHM } as const;
+
+/**
+ * Bytes of CSPRNG entropy behind an unusable password (see
+ * {@link unusablePassword}). 32 bytes is the same budget as a refresh token.
+ */
+export const UNUSABLE_PASSWORD_BYTES = 32;
+/** Encoding of the discarded plaintext. Never persisted; only its hash is. */
+const UNUSABLE_PASSWORD_ENCODING = 'base64url';
+
+/**
+ * A password nobody holds, for an account that authenticates **only** through
+ * Cloudflare Access (ADR 0010): random bytes, returned once so the caller can
+ * hash them, and never stored or transmitted anywhere.
+ *
+ * ## Why not a sentinel string
+ * `users.password_hash` is `NOT NULL`, so a passwordless account needs *some*
+ * value, and the obvious choice is a marker like `'!cloudflare-access'`. That is
+ * a trap. {@link verifyPassword} answers `false` for a malformed hash in
+ * microseconds, whereas a genuine Argon2id verify costs tens of milliseconds —
+ * so a marker makes "this address is an Access account" measurable from response
+ * time alone. That is a *better* account oracle than the one
+ * `TIMING_DECOY_PASSWORD_HASH` in `auth.service.ts` was added to destroy.
+ *
+ * Making the column nullable is no better: `string | null` propagates into
+ * `AuthUser` and into `login`, and someone eventually writes
+ * `if (hash === null) throw` — reintroducing the same branch and the same oracle.
+ *
+ * Hashing real entropy instead means `login` needs **no branch at all**. It runs
+ * a full-cost verify that always fails, so the byte-identical body and the
+ * equal wall-clock cost are inherited from the existing wrong-password path
+ * rather than argued for again.
+ *
+ * Consequence, accepted deliberately: the `users` table does not record which
+ * accounts are passwordless. If that is ever needed, add a separate
+ * `auth_provider` column — and **never branch `login` on it**.
+ */
+export function unusablePassword(): string {
+  return randomBytes(UNUSABLE_PASSWORD_BYTES).toString(UNUSABLE_PASSWORD_ENCODING);
+}
 
 /* ------------------------------------------------------------------ *
  * API

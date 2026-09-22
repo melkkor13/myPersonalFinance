@@ -8,6 +8,7 @@ import {
   type LoginRequest,
   type LoginResponse,
   type LogoutRequest,
+  AUTH_MODE,
   type MeResponse,
   type RefreshRequest,
   type RefreshResponse,
@@ -51,12 +52,19 @@ import {
 /** None of the scaffold's routes are parameterised. */
 type NoPathParams = Record<string, never>;
 
-/** The user `GET /api/v1/me` reports. */
+/** The user `GET /api/v1/me` reports for a password session. */
 export const ME_BODY: MeResponse = {
   id: TEST_USER_ID,
   email: TEST_USER_EMAIL,
   default_currency: TEST_USER_CURRENCY,
   created_at: TEST_USER_CREATED_AT,
+  auth_mode: AUTH_MODE.PASSWORD,
+};
+
+/** The same user, authenticated by Cloudflare Access instead (ADR 0010). */
+export const ME_BODY_CLOUDFLARE_ACCESS: MeResponse = {
+  ...ME_BODY,
+  auth_mode: AUTH_MODE.CLOUDFLARE_ACCESS,
 };
 
 /** A healthy API. */
@@ -152,6 +160,27 @@ export function meHandler() {
     }
 
     return HttpResponse.json<MeResponse>(ME_BODY, { status: STATUS_OK });
+  });
+}
+
+/**
+ * `GET /api/v1/me` as it behaves behind Cloudflare Access: authenticated with
+ * **no** `Authorization` header at all.
+ *
+ * In production the credential is the edge-injected `Cf-Access-Jwt-Assertion`
+ * header, which neither the browser nor MSW can see — from the client's point of
+ * view the request simply carries no token and succeeds anyway. Asserting the
+ * absence of the header is the point: it proves the web app is not secretly
+ * relying on a stored token in Access mode.
+ */
+export function cloudflareAccessMeHandler() {
+  return http.get<NoPathParams, never, MeResponse | ErrorResponse>(ROUTES.ME, ({ request }) => {
+    // `null` means no `Authorization` header at all, which is the ONLY shape
+    // this handler accepts: under Access the browser has no token to send.
+    if (bearerTokenOf(request) !== null) {
+      return unauthorized();
+    }
+    return HttpResponse.json<MeResponse>(ME_BODY_CLOUDFLARE_ACCESS, { status: STATUS_OK });
   });
 }
 

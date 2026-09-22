@@ -76,3 +76,40 @@ export const EMAIL_MAX_LENGTH = 254;
 export const CURRENCY_CODE_LENGTH = 3;
 /** Refresh token is 32 CSPRNG bytes, base64url — 43 chars unpadded. */
 export const REFRESH_TOKEN_MIN_LENGTH = 1;
+
+/**
+ * Default ISO 4217 code for a newly created user. Lives here, not in
+ * `apps/api/src/db/seed.ts`, because both the seed script and the Cloudflare
+ * Access auto-provisioning path in `auth.service.ts` need it — and a service may
+ * not import from `src/db/**` (boundary rule B2).
+ */
+export const DEFAULT_CURRENCY_CODE = 'USD';
+
+/**
+ * How the caller of an authenticated request proved who they are.
+ *
+ * `password` — an `Authorization: Bearer <jwt>` minted by `POST /auth/login`.
+ * `cloudflare_access` — a `Cf-Access-Jwt-Assertion` header verified against the
+ * Cloudflare Access team JWKS, injected at the edge.
+ *
+ * The web app reads this off `GET /api/v1/me` to decide what "log out" means:
+ * clearing its token store is meaningless when the session lives in Cloudflare's
+ * `CF_Authorization` cookie. See {@link CF_ACCESS_LOGOUT_PATH}.
+ */
+export const AUTH_MODE_PASSWORD = 'password';
+export const AUTH_MODE_CLOUDFLARE_ACCESS = 'cloudflare_access';
+export const AUTH_MODE_VALUES = [AUTH_MODE_PASSWORD, AUTH_MODE_CLOUDFLARE_ACCESS] as const;
+
+export const AUTH_MODE = {
+  PASSWORD: AUTH_MODE_PASSWORD,
+  CLOUDFLARE_ACCESS: AUTH_MODE_CLOUDFLARE_ACCESS,
+} as const;
+
+export type AuthMode = (typeof AUTH_MODE_VALUES)[number];
+
+/**
+ * Cloudflare's own logout endpoint, served on the application hostname by the
+ * edge — it never reaches this origin. Ending a Cloudflare Access session means
+ * a full-page navigation here, not a `fetch`.
+ */
+export const CF_ACCESS_LOGOUT_PATH = '/cdn-cgi/access/logout';

@@ -49,7 +49,9 @@ import {
 } from '../../src/db/sqlite.js';
 import { hashPassword } from '../../src/lib/password.js';
 import { hashRefreshToken } from '../../src/lib/tokens.js';
-import { buildServer } from '../../src/server.js';
+import { createCfAccessVerifier } from '../../src/lib/cloudflare-access.js';
+import { buildServer, type ServerDependencies } from '../../src/server.js';
+import { type CfAccessTestKeys } from './cf-access-tokens.js';
 import {
   HEADER_AUTHORIZATION,
   METHOD_POST,
@@ -60,6 +62,8 @@ import {
   TEST_USER_EMAIL,
   TEST_USER_PASSWORD,
   UNBOUND_TEST_PORT,
+  TEST_CF_ACCESS_AUD,
+  TEST_CF_ACCESS_TEAM_DOMAIN,
 } from './constants.js';
 
 /** Message prefix used when a value a test depends on is unexpectedly absent. */
@@ -99,6 +103,10 @@ export function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     accessTokenTtl: DEFAULT_ACCESS_TOKEN_TTL,
     refreshTokenTtl: DEFAULT_REFRESH_TOKEN_TTL,
     logLevel: LOG_LEVEL_SILENT,
+    // Access is OFF by default, which is what keeps every pre-existing suite
+    // unchanged: the `Cf-Access-Jwt-Assertion` header is ignored outright unless
+    // a test opts in via `startCfAccessServer`.
+    cfAccessEnabled: false,
     version: readAppVersion(),
   };
   return { ...base, ...overrides };
@@ -110,8 +118,36 @@ export function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
  */
 export async function startTestServer(
   overrides: Partial<AppConfig> = {},
+  deps: ServerDependencies = {},
 ): Promise<FastifyInstance> {
-  const app = buildServer(testConfig(overrides));
+  const app = buildServer(testConfig(overrides), deps);
+  await app.ready();
+  return app;
+}
+
+/**
+ * A server with Cloudflare Access enabled and its verifier pointed at a
+ * **locally generated** key pair, so nothing touches the network.
+ *
+ * The injected verifier is the reason `buildServer` takes `ServerDependencies`:
+ * the real one resolves keys from `https://<team>/cdn-cgi/access/certs`.
+ */
+export async function startCfAccessServer(
+  keys: CfAccessTestKeys,
+  overrides: Partial<AppConfig> = {},
+): Promise<FastifyInstance> {
+  const config = testConfig({
+    cfAccessEnabled: true,
+    cfAccessTeamDomain: TEST_CF_ACCESS_TEAM_DOMAIN,
+    cfAccessAud: TEST_CF_ACCESS_AUD,
+    ...overrides,
+  });
+  const app = buildServer(config, {
+    cfAccessVerifier: createCfAccessVerifier(
+      { cfAccessTeamDomain: TEST_CF_ACCESS_TEAM_DOMAIN, cfAccessAud: TEST_CF_ACCESS_AUD },
+      keys.jwks,
+    ),
+  });
   await app.ready();
   return app;
 }

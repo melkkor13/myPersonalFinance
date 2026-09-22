@@ -211,8 +211,15 @@ export async function verifyAccessToken(
   }
 }
 
-/** Map a `jose` verification error onto a {@link TokenFailureReason}. */
-function classifyVerificationFailure(cause: unknown): TokenFailureReason {
+/**
+ * Map a `jose` verification error onto a {@link TokenFailureReason}.
+ *
+ * Exported because `lib/cloudflare-access.ts` verifies a *different* JWT (RS256,
+ * from the Cloudflare Access edge) but classifies its failures identically. A
+ * second `instanceof` ladder there would drift from this one the first time
+ * `jose` adds an error class.
+ */
+export function classifyVerificationFailure(cause: unknown): TokenFailureReason {
   if (cause instanceof joseErrors.JWTExpired) {
     return TOKEN_FAILURE.EXPIRED;
   }

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import {
+  AUTH_MODE_VALUES,
   CURRENCY_CODE_LENGTH,
   EMAIL_MAX_LENGTH,
   PASSWORD_MAX_LENGTH,
@@ -62,7 +63,7 @@ export const LogoutRequestSchema = z.object({
 export type LogoutRequest = z.infer<typeof LogoutRequestSchema>;
 
 /**
- * `GET /api/v1/me` response — the one access-token-protected route.
+ * `GET /api/v1/me` response — the module's one protected route.
  *
  * `password_hash` MUST NEVER appear here. The `users` row carries it (FR9) but
  * it is stripped at the repository boundary, and Zod response serialization
@@ -74,6 +75,15 @@ export const MeResponseSchema = z.object({
   email: emailField,
   default_currency: z.string().length(CURRENCY_CODE_LENGTH),
   created_at: z.iso.datetime(),
+  /**
+   * How *this* request was authenticated — a property of the credential, not of
+   * the stored user, so it is not a `users` column. The web app needs it because
+   * logging out of a Cloudflare Access session is a navigation to
+   * `CF_ACCESS_LOGOUT_PATH`, whereas logging out of a password session is a call
+   * to `POST /auth/logout`. Returning it here rather than from a separate
+   * endpoint keeps the SPA's first paint at one request.
+   */
+  auth_mode: z.enum(AUTH_MODE_VALUES),
 });
 
 export type MeResponse = z.infer<typeof MeResponseSchema>;

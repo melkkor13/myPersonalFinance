@@ -34,11 +34,18 @@
  * Reasons are returned to the *route* as nothing at all; they exist only as the
  * comments and constants below.
  */
-import type { LoginResponse, MeResponse, RefreshResponse } from '@finance/contracts';
+import {
+  type AuthMode,
+  DEFAULT_CURRENCY_CODE,
+  type LoginResponse,
+  type MeResponse,
+  type RefreshResponse,
+} from '@finance/contracts';
 
 import type { AppConfig } from '../../config.js';
 import { UnauthenticatedError } from '../../lib/errors.js';
-import { verifyPassword } from '../../lib/password.js';
+import type { CfAccessIdentity } from '../../lib/cloudflare-access.js';
+import { hashPassword, unusablePassword, verifyPassword } from '../../lib/password.js';
 import {
   generateRefreshToken,
   hashRefreshToken,
@@ -48,6 +55,8 @@ import {
 
 import {
   type AuthUser,
+  findOrCreateUserByEmail,
+  type ProvisionedUser,
   findRefreshTokenByHash,
   findUserByEmail,
   findUserById,
@@ -112,12 +121,15 @@ export type AuthConfig = Pick<
  * serialization would also strip unknown keys (C7), but that is a second net
  * beneath this one, not the mechanism.
  */
-function toMeResponse(user: AuthUser): MeResponse {
+function toMeResponse(user: AuthUser, authMode: AuthMode): MeResponse {
   return {
     id: user.id,
     email: user.email,
     default_currency: user.default_currency,
     created_at: user.created_at,
+    // Not a `users` column: how this caller authenticated is a property of the
+    // credential presented on this request, supplied by the `authenticate` hook.
+    auth_mode: authMode,
   };
 }
 
@@ -311,10 +323,55 @@ export function logout(config: AuthConfig, refreshToken: string, now: Date = new
  *
  * @throws UnauthenticatedError when no user has that id.
  */
-export function me(config: AuthConfig, userId: string): MeResponse {
+export function me(config: AuthConfig, userId: string, authMode: AuthMode): MeResponse {
   const user = findUserById(config.dbPath, userId);
   if (user === undefined) {
     throw new UnauthenticatedError();
   }
-  return toMeResponse(user);
+  return toMeResponse(user, authMode);
+}
+
+/* ------------------------------------------------------------------ *
+ * Cloudflare Access
+ * ------------------------------------------------------------------ */
+
+/**
+ * Resolve a verified Cloudflare Access identity to a local user, creating one on
+ * first sight (ADR 0010).
+ *
+ * The identity has **already been proven** by `lib/cloudflare-access.ts` before
+ * this is called; nothing here re-decides whether the caller is who they say
+ * they are. What it decides is which `users` row that person is.
+ *
+ * ## Auto-provisioning makes the Access policy the authorization boundary
+ * Any address the Cloudflare Access policy admits gets a row here, and every row
+ * here has full access to the finance data. There is no second app-side
+ * allowlist. Broadening the Access policy — a group, a domain match, an
+ * "allow everyone" left behind after debugging — therefore grants data access
+ * with no signal in this codebase. That is why provisioning is logged by the
+ * caller at `warn`: in a single-user application, creating an account is not an
+ * `info`-level event.
+ *
+ * ## Identity is joined on email
+ * If the upstream identity provider ever changes someone's address, they get a
+ * fresh empty account rather than their existing one. Accepted for now; the fix
+ * is a `users.access_subject` column matched ahead of email, and
+ * `identity.subject` is deliberately carried this far so that remains possible.
+ */
+export async function authenticateCloudflareIdentity(
+  config: AuthConfig,
+  identity: CfAccessIdentity,
+  now: Date = new Date(),
+): Promise<ProvisionedUser> {
+  // Hashed BEFORE the lookup-or-insert, which is synchronous: awaiting between
+  // the read and the write is what would open an interleaving window.
+  const passwordHash = await hashPassword(unusablePassword());
+
+  return findOrCreateUserByEmail(
+    config.dbPath,
+    identity.email,
+    passwordHash,
+    DEFAULT_CURRENCY_CODE,
+    now,
+  );
 }

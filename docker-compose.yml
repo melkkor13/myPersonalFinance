@@ -77,10 +77,15 @@ services:
       target: web
     image: myfinance-web:local
     # Bound to loopback on purpose: the only way in is whatever proxy or tunnel
-    # runs on the host. Change this to "8080:80" only if you actually intend to
+    # runs on the host. Change this to "10000:80" only if you actually intend to
     # expose plain HTTP to your LAN.
+    #
+    # 10000 is the HOST port only; nginx inside the container still listens on 80
+    # and the api on 3000, so `deploy/nginx.conf` and the healthcheck are
+    # unaffected. Whatever fronts this — the cloudflared ingress — must point at
+    # 127.0.0.1:10000.
     ports:
-      - '127.0.0.1:8080:80'
+      - '127.0.0.1:10000:80'
     depends_on:
       api:
         condition: service_healthy

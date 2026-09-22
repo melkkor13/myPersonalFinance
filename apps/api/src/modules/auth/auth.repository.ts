@@ -37,6 +37,13 @@ import { getDb } from '../../db/client.js';
 import { isoTimestamp, refreshTokens, users } from '../../db/schema.js';
 
 /* ------------------------------------------------------------------ *
+ * Named constants
+ * ------------------------------------------------------------------ */
+
+/** Only ever raised if SQLite reports neither an insert nor a conflicting row. */
+const USER_PROVISIONING_FAILED_MESSAGE = 'Failed to provision user after insert';
+
+/* ------------------------------------------------------------------ *
  * Domain objects
  * ------------------------------------------------------------------ */
 
@@ -124,6 +131,72 @@ function toStoredRefreshToken(row: typeof refreshTokens.$inferSelect): StoredRef
 export function findUserByEmail(dbPath: string, email: string): AuthUser | undefined {
   const row = getDb(dbPath).select().from(users).where(eq(users.email, email)).get();
   return row === undefined ? undefined : toAuthUser(row);
+}
+
+/** Outcome of {@link findOrCreateUserByEmail} — `created` drives the audit log. */
+export interface ProvisionedUser {
+  readonly user: AuthUser;
+  /** `true` only on the call that actually inserted the row. */
+  readonly created: boolean;
+}
+
+/**
+ * The user with this email, inserting one if none exists — the Cloudflare
+ * Access auto-provisioning path (ADR 0010).
+ *
+ * ## Concurrency
+ * Two simultaneous first requests for the same address both reach the insert.
+ * `onConflictDoNothing` on the `users_email_unique` index turns the loser into a
+ * no-op instead of a 500, and the unconditional re-select afterwards means both
+ * callers return the same row. `created` is derived from the insert's `changes`,
+ * so exactly one of them reports `true`.
+ *
+ * `better-sqlite3` is synchronous and this function contains no `await`, so the
+ * lookup, the insert and the re-read all happen in one turn of the event loop.
+ * **Do not make this async or hash a password inside it** — `passwordHash` is
+ * computed by the caller precisely so that no `await` can be introduced between
+ * the read and the write.
+ *
+ * @param email MUST already be normalised (`normaliseEmail`). SQLite's unique
+ * index is case-sensitive, so an un-normalised address would insert a duplicate
+ * row rather than matching the existing one.
+ * @param passwordHash An Argon2id hash of discarded entropy — see
+ * `lib/password.ts::unusablePassword`. Never a marker string.
+ */
+export function findOrCreateUserByEmail(
+  dbPath: string,
+  email: string,
+  passwordHash: string,
+  defaultCurrency: string,
+  now: Date = new Date(),
+): ProvisionedUser {
+  const db = getDb(dbPath);
+
+  const existing = findUserByEmail(dbPath, email);
+  if (existing !== undefined) {
+    return { user: existing, created: false };
+  }
+
+  const row: typeof users.$inferInsert = {
+    id: uuidv7(),
+    email,
+    passwordHash,
+    defaultCurrency,
+    createdAt: isoTimestamp(now),
+  };
+
+  const result = db.insert(users).values(row).onConflictDoNothing({ target: users.email }).run();
+
+  // Re-read unconditionally rather than returning `row`: on a conflict the
+  // stored row is the *other* request's, with a different id and timestamp, and
+  // returning ours would hand the caller an id that is not in the database.
+  const stored = findUserByEmail(dbPath, email);
+  if (stored === undefined) {
+    // Unreachable: the insert either wrote the row or lost to one that exists.
+    throw new Error(USER_PROVISIONING_FAILED_MESSAGE);
+  }
+
+  return { user: stored, created: result.changes > 0 };
 }
 
 /** The user with this id, or `undefined`. Backs `GET /api/v1/me`. */

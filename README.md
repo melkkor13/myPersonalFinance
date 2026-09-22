@@ -166,12 +166,37 @@ docker compose up -d
 docker compose run --rm migrate node dist/db/seed.js
 ```
 
-A `Makefile` wraps these: `make up`, `make down`, `make logs`, `make build`, `make seed`.
+A `Makefile` wraps these: `make up`, `make down`, `make logs`, `make build`, `make seed`,
+`make update`.
 
-The app is then on <http://localhost:8080> **on the Pi**. Migrations are applied by a one-shot
+The app is then on <http://localhost:10000> **on the Pi**. Migrations are applied by a one-shot
 `migrate` service that `api` waits on (`service_completed_successfully`); it is idempotent, so it
 runs harmlessly on every `up`. Seeding is a separate manual step on purpose — creating the only
 account should not be a side effect of starting the app.
+
+### Deploying a new version
+
+On the Pi, in the checkout compose was started from:
+
+```sh
+make update      # git pull --ff-only, docker compose build, docker compose up -d
+```
+
+Three things about it worth knowing:
+
+- **A failed build leaves the running containers alone.** Build and `up` are separate steps, so a
+  commit that does not compile costs you nothing — the old version keeps serving until a new image
+  actually exists.
+- **It exits 0 only once the new API is healthy.** `web` depends on `api` being
+  `service_healthy`, and `/api/v1/health` really queries the database, so a green `make update` is
+  a genuine readiness signal rather than "a container started".
+- **`--ff-only` means a diverged checkout fails loudly.** If it refuses, someone committed on the
+  Pi; fix that deliberately rather than letting a merge commit appear on the box.
+
+It does not seed, and it does not touch the `finance-data` volume. Old images are left dangling —
+run `docker image prune -f` when disk gets tight. There is still **no off-Pi backup**; that is
+designed but unimplemented in `think/deploy-to-raspberry-pi-via-github-actions.md`, and
+`make update` applies migrations to your only copy of the data.
 
 ### Two things that are deliberate
 
@@ -179,24 +204,45 @@ account should not be a side effect of starting the app.
   `apps/api/test/hermetic-no-db-files.test.ts` runs `find` across the working tree and fails if
   any `*.db`, `*.db-wal` or `*.db-shm` exists there, so `./data:/data` would turn a normal deploy
   into a red test suite. `.gitignore` hides such a file from git, not from `find`.
-- **`web` publishes `127.0.0.1:8080:80`, not `8080:80`.** The only route in is whatever proxy or
+- **`web` publishes `127.0.0.1:10000:80`, not `10000:80`.** The only route in is whatever proxy or
   tunnel runs on the host. Widen it only if you intend to serve plain HTTP to your LAN.
 
-### Before exposing it beyond the Pi
+### Exposing it beyond the Pi: Cloudflare Access
 
-The scaffold assumed localhost (A4). Two gaps in `docs/deferred.md` become live the moment it is
-reachable from elsewhere, and neither is fixed by containerising it:
+The scaffold assumed localhost (A4). The deployed setup puts **Cloudflare Access** in front of the
+hostname, and the API verifies the identity Access proves
+([ADR 0010](docs/adr/0010-cloudflare-access-as-primary-authentication.md)). That closes the three
+gaps that going internet-facing would otherwise open: the browser holds no token, `/auth/login` is
+not externally reachable, and `/api/v1/openapi.json` is no longer anonymous.
 
-- **No rate limiting on `/auth/*`.** Nothing throttles login attempts. Put the throttle in
-  whatever fronts the app (e.g. a Cloudflare rate-limiting rule, or an access proxy).
-- **`/api/v1/docs` and `/api/v1/openapi.json` are unauthenticated** and sit under the proxied
-  `/api` prefix, so they go public with everything else. Add an nginx `location` returning 404
-  for them if that is not wanted.
+**Setup, once, on the Cloudflare side:**
 
-Residually: the browser keeps its refresh token in `localStorage`
-(`apps/web/src/api/tokens.ts`), so any XSS in the SPA yields a session for the full
-`REFRESH_TOKEN_TTL`. Fixing that means an `HttpOnly` cookie and reworking `refresh.ts` and the
-auth routes — out of scope here, and recorded in `docs/deferred.md`.
+1. Zero Trust → Access → Applications → add a self-hosted application for your hostname.
+2. Add a policy listing the email addresses allowed in. **Read this twice.** Auto-provisioning
+   means any address this policy admits gets a user row with full access to the finance data;
+   there is no second app-side allowlist.
+3. Copy two values into `.env` on the Pi:
+   - `CF_ACCESS_TEAM_DOMAIN` — your team domain, a bare hostname
+     (`your-team.cloudflareaccess.com`), no scheme and no trailing slash.
+   - `CF_ACCESS_AUD` — the application's **Application Audience (AUD) Tag**, 64 hex characters,
+     from the application's Overview tab.
+4. Set `CF_ACCESS_ENABLED=true` and restart. Enabling it without the other two is a fatal boot
+   error, deliberately: a box that believes Access is on but silently fell back to password-only
+   looks identical from outside to a working one.
+5. Keep the application's **session duration short** (24h). `identity_nonce` is not checked, so
+   Cloudflare's "revoke user sessions" only takes effect when the current assertion expires. A
+   user-initiated logout is immediate.
+
+Verify with `curl -sI https://your-host/api/v1/health` — it should `302` to the Access login, not
+answer `200`.
+
+**Locally, leave `CF_ACCESS_ENABLED=false`.** The header is then ignored outright and `npm run dev`
+keeps using email/password login, which is also the path for any future CLI or mobile client. A
+password login still stores its refresh token in `localStorage` (`apps/web/src/api/tokens.ts`);
+that path is unreachable in the deployed browser flow, where no token is issued at all.
+
+Still open, and listed in `docs/deferred.md`: `/api/v1/auth/*` is unthrottled for anything that can
+already reach the Pi's loopback, since Access protects the hostname and not `127.0.0.1:10000`.
 
 ## Scripts (root, FR13)
 

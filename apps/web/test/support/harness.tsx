@@ -67,16 +67,21 @@ export type LoadedWebApp = Awaited<ReturnType<typeof loadWebApp>>;
  * and the cache are test-local.
  */
 export function renderAppAt(app: LoadedWebApp, initialPath: string): RenderResult {
-  const router = createRouter({
-    routeTree: app.routeTree,
-    history: createMemoryHistory({ initialEntries: [initialPath] }),
-  });
-
+  // Built BEFORE the router: the route guards resolve the session by probing
+  // `/me` through `context.queryClient`, so they must share this exact cache
+  // with the components below — otherwise `/me` would be fetched twice and the
+  // request-counting assertions in `refresh-single-flight.test.ts` would drift.
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: RETRY_QUERIES },
       mutations: { retry: RETRY_QUERIES },
     },
+  });
+
+  const router = createRouter({
+    routeTree: app.routeTree,
+    history: createMemoryHistory({ initialEntries: [initialPath] }),
+    context: { queryClient },
   });
 
   const tree: ReactElement = (

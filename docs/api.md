@@ -31,15 +31,15 @@ column exists yet — see [gotchas.md](gotchas.md).
 
 Five API routes plus two meta routes.
 
-| Method | Path                   | Auth                                   | Success                               |
-| ------ | ---------------------- | -------------------------------------- | ------------------------------------- |
-| GET    | `/api/v1/health`       | none                                   | 200 / 503, `HealthResponse` both      |
-| POST   | `/api/v1/auth/login`   | none                                   | 200 `LoginResponse`                   |
-| POST   | `/api/v1/auth/refresh` | refresh token in body                  | 200 `RefreshResponse`                 |
-| POST   | `/api/v1/auth/logout`  | refresh token in body                  | 204, no body                          |
-| GET    | `/api/v1/me`           | `Authorization: Bearer <access token>` | 200 `MeResponse`                      |
-| GET    | `/api/v1/openapi.json` | none                                   | 200, OpenAPI 3.1 document             |
-| GET    | `/api/v1/docs`         | none                                   | 200 in development, 404 in production |
+| Method | Path                   | Auth                                                                    | Success                               |
+| ------ | ---------------------- | ----------------------------------------------------------------------- | ------------------------------------- |
+| GET    | `/api/v1/health`       | none                                                                    | 200 / 503, `HealthResponse` both      |
+| POST   | `/api/v1/auth/login`   | none                                                                    | 200 `LoginResponse`                   |
+| POST   | `/api/v1/auth/refresh` | refresh token in body                                                   | 200 `RefreshResponse`                 |
+| POST   | `/api/v1/auth/logout`  | refresh token in body                                                   | 204, no body                          |
+| GET    | `/api/v1/me`           | `Authorization: Bearer <access token>` **or** `Cf-Access-Jwt-Assertion` | 200 `MeResponse`                      |
+| GET    | `/api/v1/openapi.json` | none                                                                    | 200, OpenAPI 3.1 document             |
+| GET    | `/api/v1/docs`         | none                                                                    | 200 in development, 404 in production |
 
 The meta routes are exempt from the contracts rule (FR5) and are `hide: true` in the document,
 so it does not document itself.
@@ -116,7 +116,8 @@ request body. Logging out is idempotent.
 
 ### `GET /api/v1/me`
 
-The one protected route. Header: `Authorization: Bearer <access_token>`.
+The one protected route. Accepts **either** credential — see
+[Two ways to authenticate](#two-ways-to-authenticate).
 
 Response 200 (`MeResponse`):
 
@@ -125,7 +126,8 @@ Response 200 (`MeResponse`):
   "id": "01a0c468-4ffd-7716-8b1c-5409e6573f70",
   "email": "owner@example.com",
   "default_currency": "USD",
-  "created_at": "2026-09-21T14:39:25.693Z"
+  "created_at": "2026-09-21T14:39:25.693Z",
+  "auth_mode": "cloudflare_access"
 }
 ```
 
@@ -133,6 +135,46 @@ Response 200 (`MeResponse`):
 ISO-8601 UTC. **`password_hash` is never present** — it is stripped at the repository boundary,
 and Zod response serialization emits `additionalProperties: false`, so an accidental extra key
 is dropped rather than leaked.
+
+`auth_mode` is `password` | `cloudflare_access` and describes **this request's credential**, not
+the stored user — it is not a `users` column. The web app reads it to decide what signing out
+means: `POST /auth/logout` for a password session, or a full-page navigation to
+`/cdn-cgi/access/logout` for an Access one. Returning it here rather than from a separate endpoint
+keeps the SPA's first paint at a single request.
+
+## Two ways to authenticate
+
+Introduced by [ADR 0010](adr/0010-cloudflare-access-as-primary-authentication.md). Both end at the
+same `request.user`, and every failure of either answers the same byte-identical 401.
+
+| Credential                  | Header                           | Who uses it                                                             |
+| --------------------------- | -------------------------------- | ----------------------------------------------------------------------- |
+| Access token                | `Authorization: Bearer <jwt>`    | local `npm run dev`, and any future CLI or mobile client                |
+| Cloudflare Access assertion | `Cf-Access-Jwt-Assertion: <jwt>` | browsers in production — injected by the edge, never set by client code |
+
+The assertion is an RS256 JWT verified against the team's JWKS with `iss` and `aud` both pinned. It
+is not a trusted header: forging one needs Cloudflare's private key. Cloudflare also sends an
+**unsigned** `Cf-Access-Authenticated-User-Email` header, which this API never reads.
+
+Precedence in `plugins/authenticate.ts`:
+
+1. **A present assertion must verify.** Fails closed — it does _not_ fall back to the bearer path.
+   The edge asserted an identity, so an unverifiable assertion is an anomaly, and downgrading to a
+   different auth model on an anomaly is how bypasses get built. An _absent_ header is normal and
+   falls through.
+2. **An explicit bearer token then decides the principal**, even if a valid assertion is also
+   present, so a CLI client's own token is never silently ignored.
+3. Otherwise the verified Access identity is used, provisioning a `users` row on first sight,
+   matched on the lower-cased `email` claim.
+4. Nothing usable → 401.
+
+Service tokens are refused: they carry `common_name` and no `email`. With `CF_ACCESS_ENABLED=false`
+the header is ignored **outright**, not merely unverified.
+
+In Access mode a non-`GET` authenticated request must also carry `X-Request-Id`. That is a CSRF
+defence, not a trace requirement: Access auth is ambient (a cookie), so a custom header is what
+forces a preflight that this CORS-less API will fail. The web client already sends it on every
+request.
 
 Errors: 401 `UNAUTHENTICATED` for a missing header, a malformed token, a token signed with the
 wrong secret, or an expired token. The `authenticate` `onRequest` hook throws before the handler

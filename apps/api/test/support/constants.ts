@@ -112,3 +112,36 @@ export const MEDIA_TYPE_JSON = 'application/json';
 export const OPENAPI_COMPONENT_REF_PREFIX = '#/components/schemas/';
 /** `fastify-type-provider-zod@7` emits an input projection of every component. */
 export const OPENAPI_INPUT_PROJECTION_SUFFIX = 'Input';
+
+/* ------------------------------------------------------------------ *
+ * Cloudflare Access (ADR 0010)
+ * ------------------------------------------------------------------ */
+
+/** The header Cloudflare Access injects. Twin of `HEADER_AUTHORIZATION`. */
+export const HEADER_CF_ACCESS_ASSERTION = 'cf-access-jwt-assertion';
+/** Header the SPA always sends; doubles as the CSRF defence in Access mode. */
+export const HEADER_REQUEST_ID = 'x-request-id';
+
+/** A plausible team domain. Never resolved — the suite injects a local JWKS. */
+export const TEST_CF_ACCESS_TEAM_DOMAIN = 'test-team.cloudflareaccess.com';
+/** A different account, for the wrong-issuer case. */
+export const TEST_CF_ACCESS_WRONG_ISSUER = 'https://other-team.cloudflareaccess.com';
+
+/** This application's AUD tag: 64 lowercase hex, as `config.ts` demands. */
+export const TEST_CF_ACCESS_AUD = 'a'.repeat(64);
+/** A *different* Access application in the same account — must still be refused. */
+export const TEST_CF_ACCESS_OTHER_AUD = 'b'.repeat(64);
+
+/** The human Cloudflare reports. Distinct from `TEST_USER_EMAIL`. */
+export const TEST_CF_ACCESS_EMAIL = 'access-user@example.com';
+/** Same address as `TEST_CF_ACCESS_EMAIL`, differently cased (normalisation case). */
+export const TEST_CF_ACCESS_EMAIL_MIXED_CASE = 'Access-User@Example.COM';
+/** Cloudflare's opaque identity id for the test human. */
+export const TEST_CF_ACCESS_SUBJECT = 'cf-identity-0123456789';
+/** A service token carries this instead of `email`, and must be refused. */
+export const TEST_CF_ACCESS_COMMON_NAME = 'ci-robot.example.com';
+
+/** Not a JWT at all. */
+export const GARBAGE_CF_ACCESS_ASSERTION = 'garbage-assertion';
+/** Lifetime for the assertion-expiry case. */
+export const SHORT_CF_ACCESS_TTL = '1s';
