@@ -130,6 +130,74 @@ curl -s -X POST http://localhost:3000/api/v1/auth/login \
 Swagger UI (development only) is at <http://localhost:3000/api/v1/docs>; the machine-readable
 document is at <http://localhost:3000/api/v1/openapi.json>.
 
+## Running on a Raspberry Pi 5 with Docker
+
+Two containers: `api` (Node 22 + Fastify) and `web` (nginx, serving the built SPA and proxying
+`/api` to `api`). nginx is the production stand-in for the Vite dev proxy, so the SPA stays
+same-origin — `apps/web/src/api/constants.ts` pins `API_BASE_URL = ''` and the API registers no
+CORS plugin, so anything that splits them onto two origins breaks the app.
+
+### Prerequisites
+
+- **A 64-bit OS.** `uname -m` must print `aarch64`. `better-sqlite3@13` ships no `armv7l`
+  prebuild, so on 32-bit Raspberry Pi OS the image build falls back to node-gyp and fails.
+- Docker Engine with Compose v2 (`docker compose version`).
+
+No compiler toolchain is needed: every native dependency resolves a `linux-arm64` prebuild
+(`better-sqlite3` bundles `prebuilds/linux-arm64.node`; `@node-rs/argon2`, `rolldown`,
+`@tailwindcss/oxide` and `lightningcss` all have `linux-arm64-gnu` packages in the lockfile).
+One wrinkle that follows: both `npm ci` steps in the `Dockerfile` pass `--ignore-scripts`,
+because `better-sqlite3` ships a `binding.gyp` and npm therefore invokes node-gyp, which needs a
+python3 this image does not have — for a build that compiles nothing, since the prebuild is
+already there. The Dockerfile explains it at the call site.
+
+### Run it
+
+```bash
+cp .env.example .env
+# Required: JWT_SECRET (>= 32 chars) — `openssl rand -base64 48`
+# Strongly recommended: SEED_USER_EMAIL and SEED_USER_PASSWORD, so you do not
+# deploy the published default credentials.
+
+docker compose build          # several minutes on a Pi; `npm ci` dominates
+docker compose up -d
+
+# Once, to create the only user account:
+docker compose run --rm migrate node dist/db/seed.js
+```
+
+A `Makefile` wraps these: `make up`, `make down`, `make logs`, `make build`, `make seed`.
+
+The app is then on <http://localhost:8080> **on the Pi**. Migrations are applied by a one-shot
+`migrate` service that `api` waits on (`service_completed_successfully`); it is idempotent, so it
+runs harmlessly on every `up`. Seeding is a separate manual step on purpose — creating the only
+account should not be a side effect of starting the app.
+
+### Two things that are deliberate
+
+- **The database lives in a named volume (`finance-data`), not a bind mount.**
+  `apps/api/test/hermetic-no-db-files.test.ts` runs `find` across the working tree and fails if
+  any `*.db`, `*.db-wal` or `*.db-shm` exists there, so `./data:/data` would turn a normal deploy
+  into a red test suite. `.gitignore` hides such a file from git, not from `find`.
+- **`web` publishes `127.0.0.1:8080:80`, not `8080:80`.** The only route in is whatever proxy or
+  tunnel runs on the host. Widen it only if you intend to serve plain HTTP to your LAN.
+
+### Before exposing it beyond the Pi
+
+The scaffold assumed localhost (A4). Two gaps in `docs/deferred.md` become live the moment it is
+reachable from elsewhere, and neither is fixed by containerising it:
+
+- **No rate limiting on `/auth/*`.** Nothing throttles login attempts. Put the throttle in
+  whatever fronts the app (e.g. a Cloudflare rate-limiting rule, or an access proxy).
+- **`/api/v1/docs` and `/api/v1/openapi.json` are unauthenticated** and sit under the proxied
+  `/api` prefix, so they go public with everything else. Add an nginx `location` returning 404
+  for them if that is not wanted.
+
+Residually: the browser keeps its refresh token in `localStorage`
+(`apps/web/src/api/tokens.ts`), so any XSS in the SPA yields a session for the full
+`REFRESH_TOKEN_TTL`. Fixing that means an `HttpOnly` cookie and reworking `refresh.ts` and the
+auth routes — out of scope here, and recorded in `docs/deferred.md`.
+
 ## Scripts (root, FR13)
 
 All delegate to workspaces.

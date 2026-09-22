@@ -1,0 +1,94 @@
+# Runs the app on a Raspberry Pi 5 (arm64) as two containers.
+#
+#   docker compose build
+#   docker compose up -d
+#   docker compose run --rm migrate node dist/db/seed.js   # once, creates the user
+#
+# Nothing here is architecture-specific: `docker compose build` on the Pi
+# produces arm64 images because the Pi is arm64. Building on an x86 machine for
+# the Pi needs `docker buildx build --platform linux/arm64`.
+#
+# Ports: only `web` publishes one, and only on 127.0.0.1. The API is reachable
+# exclusively from inside the compose network.
+
+name: myfinance
+
+# Both `migrate` and `api` are the same image; the anchor keeps them from
+# drifting and lets BuildKit build it once.
+x-api-build: &api-build
+  context: .
+  target: api
+
+x-api-env: &api-env
+  # Container paths, set here rather than in `.env`, so the same `.env` works for
+  # local `npm run dev` (where DB_PATH is ./data/finance.db) and for Docker.
+  # `environment` takes precedence over `env_file`.
+  DB_PATH: /data/finance.db
+  NODE_ENV: production
+
+services:
+  # One-shot: applies the committed migrations, then exits 0.
+  #
+  # Safe on every boot — drizzle records applied migrations in
+  # `__drizzle_migrations`, so a second run applies nothing. It deliberately does
+  # NOT seed: `dist/db/seed.js` is also idempotent, but creating the only user
+  # account should be an explicit act, not a side effect of `up`.
+  #
+  # Note this service needs no JWT_SECRET: `migrate.js` reads DB_PATH via
+  # `resolveDbPath()` and never calls `loadConfig()`.
+  migrate:
+    build: *api-build
+    image: myfinance-api:local
+    env_file: .env
+    environment: *api-env
+    volumes:
+      - finance-data:/data
+    command: ['node', 'dist/db/migrate.js']
+    restart: 'no'
+
+  api:
+    build: *api-build
+    image: myfinance-api:local
+    env_file: .env
+    environment: *api-env
+    volumes:
+      - finance-data:/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    # /api/v1/health really queries the database and answers 503 when it cannot,
+    # so this is a genuine readiness check and not just a liveness ping. `fetch`
+    # is used because the slim image ships no curl or wget.
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  web:
+    build:
+      context: .
+      target: web
+    image: myfinance-web:local
+    # Bound to loopback on purpose: the only way in is whatever proxy or tunnel
+    # runs on the host. Change this to "8080:80" only if you actually intend to
+    # expose plain HTTP to your LAN.
+    ports:
+      - '127.0.0.1:8080:80'
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  # A NAMED volume, not a bind mount into the repo. `apps/api/test/hermetic-no-db-files.test.ts`
+  # shells out to `find` across the working tree and FAILS if any *.db, *.db-wal
+  # or *.db-shm exists there, so `./data:/data` would turn a normal deploy into a
+  # red test suite. .gitignore hides such a file from git, not from find.
+  finance-data:
