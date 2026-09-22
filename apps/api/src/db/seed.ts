@@ -30,11 +30,22 @@ import { resolveDbPath } from './sqlite.js';
  * Named constants — the seed identity (FR16)
  * ------------------------------------------------------------------ */
 
-/** Known email for the single seeded user. */
+/** Default email for the single seeded user. Overridable via `SEED_USER_EMAIL`. */
 export const SEED_USER_EMAIL = 'owner@example.com';
 
-/** Known password. Localhost-only scaffold (A4); never used outside seeding. */
+/**
+ * Default password. Overridable via `SEED_USER_PASSWORD`.
+ *
+ * It is a **known, published** value, which was acceptable while assumption A4
+ * (localhost-only) held. Any deployment reachable from another machine must set
+ * `SEED_USER_PASSWORD` before seeding: there is no rate limiting on `/auth/*`
+ * (docs/deferred.md), so a known credential is a known way in.
+ */
 export const SEED_USER_PASSWORD = 'change-me-please-123';
+
+/** Env vars that override the seed identity. Read by this script and nothing else. */
+export const SEED_USER_EMAIL_ENV_VAR = 'SEED_USER_EMAIL';
+export const SEED_USER_PASSWORD_ENV_VAR = 'SEED_USER_PASSWORD';
 
 /**
  * Whole-dataset currency (A2). ISO-4217 alpha-3, matching the schema's
@@ -47,6 +58,44 @@ const SEED_CREATED_MESSAGE = 'Seeded user';
 const SEED_EXISTS_MESSAGE = 'Seed user already exists, nothing to do';
 const MESSAGE_SEPARATOR = ': ';
 
+/** The identity the seed script will create, after applying env overrides. */
+export interface SeedIdentity {
+  readonly email: string;
+  readonly password: string;
+}
+
+/**
+ * The hardcoded pair, as a `SeedIdentity`. This — not the environment — is
+ * `seed()`'s default, which keeps the test suite hermetic: a stray
+ * `SEED_USER_PASSWORD` exported in a developer's shell must not change what
+ * `npm test` seeds. Only the CLI entry point at the bottom of this file consults
+ * the environment.
+ */
+export const DEFAULT_SEED_IDENTITY: SeedIdentity = {
+  email: SEED_USER_EMAIL,
+  password: SEED_USER_PASSWORD,
+};
+
+/**
+ * Resolve the seed identity from the environment, falling back to
+ * {@link DEFAULT_SEED_IDENTITY}.
+ *
+ * Follows `resolveDbPath()` in `sqlite.ts`: read the one or two variables this
+ * script needs rather than going through `loadConfig()`, which would make a
+ * valid `JWT_SECRET` a prerequisite for seeding. An empty string is treated as
+ * unset, matching `config.ts`, so `SEED_USER_PASSWORD=` in a `.env` falls back
+ * to the default instead of creating a user with a blank password.
+ */
+export function resolveSeedIdentity(env: NodeJS.ProcessEnv = process.env): SeedIdentity {
+  const email = env[SEED_USER_EMAIL_ENV_VAR];
+  const password = env[SEED_USER_PASSWORD_ENV_VAR];
+
+  return {
+    email: email === undefined || email === '' ? SEED_USER_EMAIL : email,
+    password: password === undefined || password === '' ? SEED_USER_PASSWORD : password,
+  };
+}
+
 /** Result of a seed run, so callers/tests can tell creation from a no-op. */
 export interface SeedResult {
   readonly email: string;
@@ -56,25 +105,31 @@ export interface SeedResult {
 /**
  * Create the seed user if absent.
  *
- * @returns `created: false` when a user with `SEED_USER_EMAIL` already existed.
+ * @param identity whom to create; defaults to {@link DEFAULT_SEED_IDENTITY}.
+ * The CLI entry point passes `resolveSeedIdentity()` so that `SEED_USER_EMAIL` /
+ * `SEED_USER_PASSWORD` apply to `db:seed` and to the container, and nowhere else.
+ * @returns `created: false` when a user with that email already existed.
  */
-export async function seed(dbPath: string = resolveDbPath()): Promise<SeedResult> {
+export async function seed(
+  dbPath: string = resolveDbPath(),
+  identity: SeedIdentity = DEFAULT_SEED_IDENTITY,
+): Promise<SeedResult> {
   const owned = createOwnedDb(dbPath);
   const { db } = owned;
 
   try {
-    const existing = db.select().from(users).where(eq(users.email, SEED_USER_EMAIL)).all();
+    const existing = db.select().from(users).where(eq(users.email, identity.email)).all();
 
     if (existing.length > 0) {
-      return { email: SEED_USER_EMAIL, created: false };
+      return { email: identity.email, created: false };
     }
 
-    const passwordHash = await hashPassword(SEED_USER_PASSWORD);
+    const passwordHash = await hashPassword(identity.password);
 
     db.insert(users)
       .values({
         id: uuidv7(),
-        email: SEED_USER_EMAIL,
+        email: identity.email,
         passwordHash,
         defaultCurrency: SEED_USER_DEFAULT_CURRENCY,
         createdAt: isoTimestamp(),
@@ -84,14 +139,14 @@ export async function seed(dbPath: string = resolveDbPath()): Promise<SeedResult
       .onConflictDoNothing({ target: users.email })
       .run();
 
-    return { email: SEED_USER_EMAIL, created: true };
+    return { email: identity.email, created: true };
   } finally {
     owned.close();
   }
 }
 
 if (isEntryPoint(import.meta.url)) {
-  const result = await seed();
+  const result = await seed(resolveDbPath(), resolveSeedIdentity());
   printLine(
     `${result.created ? SEED_CREATED_MESSAGE : SEED_EXISTS_MESSAGE}${MESSAGE_SEPARATOR}${result.email}`,
   );

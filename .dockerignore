@@ -1,0 +1,36 @@
+# Keep the build context small and the image layers reproducible.
+#
+# NOTE: `.npmrc` and `package-lock.json` are deliberately NOT listed. The
+# Dockerfile needs both — `.npmrc` pins the public registry so `npm ci` works
+# without a CodeArtifact token, and `npm ci` requires the lockfile.
+
+# Installed on the build host for the wrong architecture; `npm ci` reinstalls.
+node_modules
+**/node_modules
+
+# Always rebuilt inside the image; copying a stale dist in would mask a
+# broken build.
+**/dist
+*.tsbuildinfo
+coverage
+
+# Secrets must never enter an image layer. Config is injected at run time.
+.env
+.env.*
+
+# Local SQLite artifacts. The container's database lives in a named volume.
+data
+*.db
+*.db-wal
+*.db-shm
+
+.git
+.github
+.DS_Store
+*.log
+
+# Prose. Not needed to build or run anything.
+docs
+think
+.specBuilder
+README.md
